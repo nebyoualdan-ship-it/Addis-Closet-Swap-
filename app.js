@@ -12,6 +12,25 @@ const isFirebaseConfigured = window.firebaseConfig &&
   window.firebaseConfig.apiKey !== "YOUR_API_KEY_HERE" &&
   window.firebaseConfig.projectId !== "YOUR_PROJECT_ID_HERE";
 
+// Telegram posting configuration
+// Telegram posting configuration
+// IMPORTANT SECURITY NOTE: Do NOT ship your bot token in client-side code for production.
+// Host a Cloud Function or secure server endpoint that holds the bot token and performs
+// Telegram Bot API calls. This client-side app should only call that secure endpoint.
+
+// HOW TO GET THESE VALUES:
+// 1) Create a bot with BotFather in Telegram. BotFather will return a Bot Token (format: 123456:ABC-DEF...).
+//    Keep that token secret and store it on your server/Cloud Function environment variables.
+// 2) To get your channel ID for a channel you manage, add your bot as an admin to the channel,
+//    then use @userinfobot or inspect the channel via Telegram Web to obtain the channel's ID.
+//    Public channels use @channelusername; private channels show IDs like -1001234567890.
+
+const TELEGRAM_BOT_TOKEN = ""; // (optional here) BotFather token — DO NOT expose publicly
+const TELEGRAM_CHANNEL_ID = "-100xxxxxxxxxx"; // e.g. -1001234567890
+// Secure endpoint that performs the actual Bot API requests using the secret bot token.
+// Deploy a Cloud Function at this URL that accepts a POST with item data and posts to Telegram.
+const TELEGRAM_POST_ENDPOINT = "https://us-central1-YOUR_PROJECT.cloudfunctions.net/postTelegramItem"; // Replace with your secure endpoint
+
 let firebaseApp = null;
 let firestoreDb = null;
 let firebaseStorage = null;
@@ -33,6 +52,7 @@ const AppState = {
     location: '',
     conditions: [],
     priceMax: 10000
+    ,dateRange: 'recent'
   },
   photosToUpload: [] // Temporary storage for photos to be uploaded
 };
@@ -40,7 +60,7 @@ const AppState = {
 // Seed Items
 const SEED_ITEMS = [
   {
-    itemId: "CE-1001",
+    itemId: "CS-1001",
     name: "Zara Wrap Dress",
     primaryCategory: "Women",
     subcategory: "Dresses",
@@ -63,7 +83,7 @@ const SEED_ITEMS = [
     soldDate: null
   },
   {
-    itemId: "CE-1002",
+    itemId: "CS-1002",
     name: "H&M Blazer",
     primaryCategory: "Women",
     subcategory: "Outerwear",
@@ -86,7 +106,7 @@ const SEED_ITEMS = [
     soldDate: null
   },
   {
-    itemId: "CE-1003",
+    itemId: "CS-1003",
     name: "Nike Sneakers",
     primaryCategory: "Shoes",
     subcategory: "Sneakers",
@@ -109,7 +129,7 @@ const SEED_ITEMS = [
     soldDate: null
   },
   {
-    itemId: "CE-1004",
+    itemId: "CS-1004",
     name: "Michael Kors Bag",
     primaryCategory: "Bags",
     subcategory: "Handbags",
@@ -132,7 +152,7 @@ const SEED_ITEMS = [
     soldDate: null
   },
   {
-    itemId: "CE-1005",
+    itemId: "CS-1005",
     name: "Crux Denim Trousers",
     primaryCategory: "Men",
     subcategory: "Pants",
@@ -255,29 +275,29 @@ const DB = {
           transaction.update(counterRef, { lastItemId: newId });
           return newId;
         });
-        return `CE-${nextId}`;
+        return `CS-${nextId}`;
       } catch (e) {
         console.warn("Firestore Counter Transaction failed, falling back to query max ID", e);
         const items = await this.getItems();
         let max = 1005;
         items.forEach(i => {
-          const num = parseInt(i.itemId?.replace("CE-", "") || "0");
+          const num = parseInt(i.itemId?.replace("CS-", "") || "0");
           if (num > max) max = num;
         });
         const nextNum = max + 1;
         try {
           await setDoc(counterRef, { lastItemId: nextNum });
         } catch(err){}
-        return `CE-${nextNum}`;
+        return `CS-${nextNum}`;
       }
     } else {
       const items = await this.getItems();
       let max = 1005;
       items.forEach(i => {
-        const num = parseInt(i.itemId?.replace("CE-", "") || "0");
+        const num = parseInt(i.itemId?.replace("CS-", "") || "0");
         if (num > max) max = num;
       });
-      return `CE-${max + 1}`;
+      return `CS-${max + 1}`;
     }
   },
 
@@ -296,6 +316,52 @@ const DB = {
     }
   }
 };
+
+// --- Telegram posting utility -------------------------------------------------
+// IMPORTANT: Do NOT expose `TELEGRAM_BOT_TOKEN` in client-side code for production.
+// Implement a secure Cloud Function or server endpoint that performs the Bot API calls.
+// This client helper forwards a request to that secure endpoint which performs the
+// actual Telegram API interaction using the bot token kept on the server.
+async function postItemToTelegramChannel(item) {
+  if (!TELEGRAM_POST_ENDPOINT) {
+    throw new Error('TELEGRAM_POST_ENDPOINT is not configured.');
+  }
+
+  const body = {
+    chatId: TELEGRAM_CHANNEL_ID,
+    item: {
+      itemId: item.itemId,
+      name: item.name,
+      primaryCategory: item.primaryCategory,
+      subcategory: item.subcategory,
+      brand: item.brand,
+      size: item.size,
+      condition: item.condition,
+      location: item.location,
+      price: item.price,
+      description: item.description,
+      flaws: item.flaws,
+      sellerName: item.sellerName,
+      sellerStatus: item.sellerStatus,
+      sellerUsername: item.sellerUsername,
+      listedDate: item.listedDate,
+      photos: item.photos || []
+    },
+    appLink: window.location.href
+  };
+
+  const resp = await fetch(TELEGRAM_POST_ENDPOINT, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  });
+
+  if (!resp.ok) {
+    const txt = await resp.text();
+    throw new Error(txt || 'Telegram post failed');
+  }
+  return resp.json();
+}
 
 // --- 3. HELPER UTILITIES ---
 // Compression utilities
@@ -522,6 +588,22 @@ function renderBrowseFeed() {
   if (AppState.filters.priceMax) {
     filtered = filtered.filter(item => item.price <= AppState.filters.priceMax);
   }
+  if (AppState.filters.dateRange && AppState.filters.dateRange !== 'all') {
+    const now = Date.now();
+    let start = now;
+    if (AppState.filters.dateRange === 'recent') {
+      start = now - 72 * 60 * 60 * 1000;
+    } else if (AppState.filters.dateRange === 'today') {
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      start = today.getTime();
+    } else if (AppState.filters.dateRange === 'week') {
+      start = now - 7 * 24 * 60 * 60 * 1000;
+    } else if (AppState.filters.dateRange === 'month') {
+      start = now - 30 * 24 * 60 * 60 * 1000;
+    }
+    filtered = filtered.filter(item => item.listedDate >= start && item.listedDate <= now);
+  }
 
   if (filtered.length === 0) {
     emptyState.style.display = "flex";
@@ -543,17 +625,12 @@ function renderBrowseFeed() {
       <img src="${item.photos[0] || 'https://picsum.photos/seed/placeholder/300/300'}" class="item-card-image" alt="${item.name}" loading="lazy">
       <div class="item-card-details">
         <div class="item-card-header">
-          <div>
-            <div class="item-card-name">${item.name}</div>
-            <div class="item-card-price">${item.price} Birr</div>
-          </div>
-          <span class="badge ${condClass}">${item.condition}</span>
+          <div class="item-card-name">${item.name}</div>
+          <div class="item-card-price">${item.price} Birr</div>
         </div>
-        <div class="item-card-meta">
-          <span>Size: ${item.size}</span>
-          <span>Loc: ${item.location}</span>
-        </div>
+        <div class="item-card-meta">Size ${item.size} · ${item.location}</div>
         <div class="item-card-badges">
+          <span class="badge ${condClass}">${item.condition}</span>
           <span class="badge badge-seller">${item.sellerStatus || 'Seller'}</span>
         </div>
       </div>
@@ -1133,12 +1210,19 @@ async function approveItemAdmin(itemId) {
   const item = AppState.items.find(i => i.itemId === itemId);
   if (!item) return;
 
+  const previousStatus = item.status;
   item.status = 'Active';
   await DB.saveItem(item);
   await refreshStateItems();
-  
   showToast(`Item ${itemId} Approved!`);
   renderAdminPanel();
+
+  if (previousStatus === 'Pending Approval') {
+    postItemToTelegramChannel(item).catch(err => {
+      console.error('Telegram post failed', err);
+      showToast(`Item approved. Channel post failed: ${err.message || 'unknown error'}`);
+    });
+  }
 }
 
 async function rejectItemAdmin(itemId) {
@@ -1253,6 +1337,29 @@ function bindFormListeners() {
     showToast("Filters applied.");
   });
 
+  // Date filter pills (inside filter drawer)
+  const dateRow = document.getElementById('filter-date-row');
+  function updateDatePills() {
+    if (!dateRow) return;
+    const pills = dateRow.querySelectorAll('.date-pill');
+    pills.forEach(p => {
+      p.classList.toggle('active', p.dataset.range === AppState.filters.dateRange);
+    });
+  }
+
+  if (dateRow) {
+    dateRow.addEventListener('click', (e) => {
+      const pill = e.target.closest('.date-pill');
+      if (!pill) return;
+      AppState.filters.dateRange = pill.dataset.range;
+      updateDatePills();
+      renderBrowseFeed();
+    });
+    // Ensure default
+    if (!AppState.filters.dateRange) AppState.filters.dateRange = 'recent';
+    updateDatePills();
+  }
+
   // Reset Filters Button
   document.getElementById("filter-reset-btn").addEventListener("click", () => {
     document.getElementById("filter-category").value = "";
@@ -1265,15 +1372,20 @@ function bindFormListeners() {
     document.getElementById("cond-likenew").checked = false;
     document.getElementById("cond-good").checked = false;
     document.getElementById("cond-fair").checked = false;
-
     AppState.filters = {
       search: searchInput.value,
       category: '',
       size: '',
       location: '',
       conditions: [],
-      priceMax: 10000
+      priceMax: 10000,
+      dateRange: 'recent'
     };
+    // refresh date pills UI
+    if (document.getElementById('filter-date-row')) {
+      const pills = document.getElementById('filter-date-row').querySelectorAll('.date-pill');
+      pills.forEach(p => p.classList.toggle('active', p.dataset.range === 'recent'));
+    }
     renderBrowseFeed();
     filterDrawer.classList.remove("open");
     showToast("Filters reset.");
